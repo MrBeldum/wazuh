@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 #### Fixed
 
 - Fixed the validation of `group_id` when reading and writing group configuration files, rejecting values that are not a valid group name. ([#40363](https://github.com/wazuh/wazuh/pull/40363))
+- Fixed the vulnerability scanner evaluating Ubuntu kernel variant packages (HWE, cloud and other flavors) against the generic `linux` product instead of the product of their source package. Cloud, OEM and low-latency kernel images, which were not evaluated before, are now scanned against their own product. ([#39267](https://github.com/wazuh/wazuh/issues/39267))
 
 ## [v4.14.10]
 
