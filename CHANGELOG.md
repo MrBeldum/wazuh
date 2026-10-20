@@ -14,6 +14,7 @@ All notable changes to this project will be documented in this file.
 - Hardened how cluster workers apply the files received from the master. ([#40366](https://github.com/wazuh/wazuh/pull/40366))
 - Fixed `wazuh-execd` keeping a local request connection open when the request could not be read, and not terminating a request of the maximum size. ([#40529](https://github.com/wazuh/wazuh/pull/40529))
 - Fixed `wazuh-logcollector` keeping a local request connection open when the request could not be read, and not terminating a request of the maximum size. ([#40537](https://github.com/wazuh/wazuh/pull/40537))
+- Fixed the vulnerability scanner reporting no OS vulnerabilities for Windows 10 agents older than 20H2, which have no display version. ([#40489](https://github.com/wazuh/wazuh/pull/40489))
 
 ### Agent
 
