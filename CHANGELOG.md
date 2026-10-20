@@ -14,6 +14,7 @@ All notable changes to this project will be documented in this file.
 - Hardened how cluster workers apply the files received from the master. ([#40366](https://github.com/wazuh/wazuh/pull/40366))
 - Fixed `wazuh-execd` keeping a local request connection open when the request could not be read, and not terminating a request of the maximum size. ([#40529](https://github.com/wazuh/wazuh/pull/40529))
 - Fixed `wazuh-logcollector` keeping a local request connection open when the request could not be read, and not terminating a request of the maximum size. ([#40537](https://github.com/wazuh/wazuh/pull/40537))
+- Fixed `wazuh-execd` keeping every repeated offender for the life of the process, so its memory grew with each new source that triggered an active response. ([#40540](https://github.com/wazuh/wazuh/pull/40540))
 
 ### Agent
 
@@ -23,6 +24,7 @@ All notable changes to this project will be documented in this file.
 - Fixed `agent-auth` failing at random with `SSL error (2)` because it did not set the receive timeout of its enrollment socket. ([#40468](https://github.com/wazuh/wazuh/pull/40468))
 - Fixed `wazuh-execd` keeping a local request connection open when the request could not be read, and not terminating a request of the maximum size. ([#40529](https://github.com/wazuh/wazuh/pull/40529))
 - Fixed `wazuh-logcollector` keeping a local request connection open when the request could not be read, and not terminating a request of the maximum size. ([#40537](https://github.com/wazuh/wazuh/pull/40537))
+- Fixed `wazuh-execd` keeping every repeated offender for the life of the process, so its memory grew with each new source that triggered an active response. ([#40540](https://github.com/wazuh/wazuh/pull/40540))
 
 ## [v4.14.10]
 
