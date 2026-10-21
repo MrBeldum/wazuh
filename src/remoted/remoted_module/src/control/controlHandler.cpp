@@ -142,8 +142,11 @@ namespace remoted::control
             incStartup(m_metrics);
 
             const bool versionMalformed = !isValidVersion(data.version);
+            // Patch-level drift is tolerated, mirroring the legacy port 1515/1514 rule:
+            // isAgentVersionNewer() only counts major/minor, so a 5.0.1 agent on a 5.0.0 manager
+            // is accepted while a 5.1.0 one is still refused.
             const bool versionTooHigh = !versionMalformed && !m_config.allowHigherVersions &&
-                                        compareVersions(m_config.managerVersion, data.version) < 0;
+                                        isAgentVersionNewer(m_config.managerVersion, data.version);
 
             if (versionMalformed || versionTooHigh)
             {

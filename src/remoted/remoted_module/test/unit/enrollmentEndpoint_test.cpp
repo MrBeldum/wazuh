@@ -405,6 +405,31 @@ TEST(EnrollmentEndpointTest, VersionTooNewIsAcceptedWhenAllowed)
     EXPECT_EQ(response.status, 200);
 }
 
+TEST(EnrollmentEndpointTest, VersionOnePatchAheadIsAcceptedWhenNotAllowed)
+{
+    // Issue #40533: the policy mirrors the legacy port 1515 rule (major/minor only), so a
+    // 5.0.1 agent against a 5.0.0 manager enrolls instead of getting a 400.
+    Config config = openModeConfig();
+    config.managerVersion = "5.0.0";
+    config.allowHigherVersions = false;
+
+    auto stub = fixedAuthdServer(R"({"error":0,"data":{"id":"1","name":"agent1","ip":"any","key":"k"}})");
+    const auto response = run(config, R"({"name":"agent1","version":"5.0.1"})", stub.path);
+    EXPECT_EQ(response.status, 200);
+}
+
+TEST(EnrollmentEndpointTest, VersionMinorAheadIsRejectedWhenNotAllowed)
+{
+    // v5.1.0 IS newer than 5.0.0 under the policy, so this must stay a 400.
+    Config config = openModeConfig();
+    config.managerVersion = "5.0.0";
+    config.allowHigherVersions = false;
+
+    const auto response =
+        run(config, R"({"name":"agent1","version":"5.1.0"})", makeUniqueSocketPath("enrollment_endpoint_v7"));
+    EXPECT_EQ(response.status, 400);
+}
+
 // -----------------------------------------------------------------------------
 // Content-Encoding wiring -- how the endpoint composes IBodyDecoder, not zstd itself (see
 // bodyDecoder_test.cpp for the real codec). These prove the decoded bytes are what actually

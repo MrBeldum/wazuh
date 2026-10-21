@@ -107,6 +107,36 @@ TEST(ControlTypesTest, CompareVersionsTreatsUnparsablePartsAsZero)
 }
 
 // -----------------------------------------------------------------------------
+// isAgentVersionNewer -- the allow_higher_versions policy. Unlike compareVersions(),
+// this ignores the patch component, matching the legacy compare_wazuh_versions(..., false)
+// rule on the port 1515 enrollment and port 1514 HC_STARTUP paths (issue #40533).
+// -----------------------------------------------------------------------------
+
+TEST(ControlTypesTest, IsAgentVersionNewerIgnoresPatch)
+{
+    // A 5.0.1 agent against a 5.0.0 manager: accepted, not "too new".
+    EXPECT_FALSE(isAgentVersionNewer("5.0.0", "5.0.1"));
+    EXPECT_FALSE(isAgentVersionNewer("5.0.0", "5.0.9"));
+    EXPECT_FALSE(isAgentVersionNewer("5.0.9", "5.0.1")); // agent patch BELOW manager's
+}
+
+TEST(ControlTypesTest, IsAgentVersionNewerRejectsHigherMinorOrMajor)
+{
+    EXPECT_TRUE(isAgentVersionNewer("5.0.0", "5.1.0"));
+    EXPECT_TRUE(isAgentVersionNewer("5.0.9", "5.1.0"));
+    EXPECT_TRUE(isAgentVersionNewer("4.9.0", "5.0.0"));
+    EXPECT_TRUE(isAgentVersionNewer("5.9.9", "6.0.0"));
+}
+
+TEST(ControlTypesTest, IsAgentVersionNewerRejectsEqualVersions)
+{
+    EXPECT_FALSE(isAgentVersionNewer("5.0.0", "5.0.0"));
+    EXPECT_FALSE(isAgentVersionNewer("5.0.0", "v5.0.0"));   // leading 'v' tolerated
+    EXPECT_FALSE(isAgentVersionNewer("5.0.0", "5.0.0-rc1")); // suffix ignored
+    EXPECT_FALSE(isAgentVersionNewer("5.0.0", "4.9.9"));    // older agent is not newer
+}
+
+// -----------------------------------------------------------------------------
 // isValidHostInfo
 //
 // Bounds-only check (no charset). Any field over its cap fails; sizes at the

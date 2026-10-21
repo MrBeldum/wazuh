@@ -324,6 +324,40 @@ TEST(ControlHandlerTest, StartupHigherVersionReturns409WhenAllowHigherFalse)
     EXPECT_TRUE(sawStatusCode);
 }
 
+TEST(ControlHandlerTest, StartupOnePatchAheadAcceptedWhenAllowHigherFalse)
+{
+    auto wdb = std::make_shared<WdbRouter>();
+    wdb->onSelectAgentGroup([](const std::string&) { return "ok [{\"group\":\"default\"}]"; });
+    HandlerFixture h(wdb, [](const std::string&) { return "{\"tasks\":[]}"; });
+
+    // Agent claims v5.0.1; manager is 5.0.0 and allowHigherVersions=false. The policy
+    // mirrors the legacy port 1515/1514 rule (major/minor only), so one patch release
+    // ahead is accepted (issue #40533), unlike the old all-four-parts comparison.
+    StartupData data;
+    data.version = "5.0.1";
+    Waiter<HttpResponse> w;
+    h.handler->handleStartup(7, data, [&](const HttpResponse& r) { w.complete(r); });
+
+    ASSERT_TRUE(w.wait(3000ms));
+    EXPECT_EQ(w.value.status, 200);
+    EXPECT_EQ(w.value.body.find("invalid_version"), std::string::npos);
+}
+
+TEST(ControlHandlerTest, StartupMinorAheadStillRejectedWhenAllowHigherFalse)
+{
+    auto wdb = std::make_shared<WdbRouter>();
+    HandlerFixture h(wdb, [](const std::string&) { return "{\"tasks\":[]}"; });
+
+    // v5.1.0 IS newer than 5.0.0 under the policy, so this must stay a 409.
+    StartupData data;
+    data.version = "5.1.0";
+    Waiter<HttpResponse> w;
+    h.handler->handleStartup(8, data, [&](const HttpResponse& r) { w.complete(r); });
+
+    ASSERT_TRUE(w.wait(3000ms));
+    EXPECT_EQ(w.value.status, 409);
+}
+
 TEST(ControlHandlerTest, StartupHappyPathReturns200WithGroupsAndClusterEnvelope)
 {
     auto wdb = std::make_shared<WdbRouter>();

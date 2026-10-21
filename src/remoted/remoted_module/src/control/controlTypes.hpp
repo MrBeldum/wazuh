@@ -90,13 +90,13 @@ namespace remoted::control
     }
 
     /**
-     * @brief Numeric-only comparison of MAJOR.MINOR.PATCH[.EXTRA] version strings.
+     * @brief Generic numeric comparison of MAJOR.MINOR.PATCH[.EXTRA] version strings.
      *
-     * Everything after '-'/'+' is discarded, matching the legacy behavior of
-     * compare_wazuh_versions(..., ignore_stage=false). Shared by /control (its own
-     * allow_higher_versions check) and /enroll (authd's local `add` path has no version check
-     * at all, so remoted enforces it itself) -- kept in one place so the two enrollment paths
-     * can never silently diverge on what "too new" means.
+     * Everything after '-'/'+' is discarded. This compares ALL four numeric parts; it is
+     * deliberately NOT the allow_higher_versions policy. (An earlier version of this comment
+     * claimed it matched "the legacy behavior of compare_wazuh_versions(..., false)" -- it does
+     * not: that third parameter is `compare_patch`, and passing `false` there means the legacy
+     * callers ignore the patch entirely. See isAgentVersionNewer().)
      *
      * @return -1 if v1 < v2, 1 if v1 > v2, 0 if equal (each unparsed/missing part treated as 0).
      */
@@ -143,6 +143,58 @@ namespace remoted::control
                 return 1;
         }
         return 0;
+    }
+
+    /**
+     * @brief The allow_higher_versions policy check: is the agent's version newer than the
+     * manager's?
+     *
+     * Compares ONLY the major and minor components, mirroring the legacy rule in
+     * compare_wazuh_versions(..., compare_patch=false) used by the port 1515 enrollment
+     * path (src/os_auth/src/auth.c) and the port 1514 HC_STARTUP path (src/remoted/src/manager.c):
+     * an agent one patch release ahead of the manager is accepted. The HTTPS /control and
+     * /enroll paths must apply the same rule -- previously they used compareVersions(), which
+     * compares all four parts and rejected a 5.0.1 agent against a 5.0.0 manager with a 409/400.
+     *
+     * compareVersions() stays the generic four-part numeric comparator; this is the policy,
+     * kept in one place so /control and /enroll can never silently diverge on what "too new"
+     * means.
+     *
+     * Callers must only pass versions that passed isValidVersion() first.
+     */
+    inline bool isAgentVersionNewer(const std::string& managerVersion, const std::string& agentVersion)
+    {
+        auto parseParts = [](const std::string& v) -> std::array<int, 2>
+        {
+            std::array<int, 2> parts {0, 0};
+            std::string version = v;
+            if (!version.empty() && (version[0] == 'v' || version[0] == 'V'))
+            {
+                version = version.substr(1);
+            }
+            const size_t pos = version.find_first_of("+-");
+            std::string numericPart = (pos != std::string::npos) ? version.substr(0, pos) : version;
+
+            std::istringstream iss(numericPart);
+            std::string token;
+            int i = 0;
+            while (std::getline(iss, token, '.') && i < static_cast<int>(parts.size()))
+            {
+                try
+                {
+                    parts[i++] = std::stoi(token);
+                }
+                catch (...)
+                {
+                    break;
+                }
+            }
+            return parts;
+        };
+
+        const auto m = parseParts(managerVersion);
+        const auto a = parseParts(agentVersion);
+        return a[0] > m[0] || (a[0] == m[0] && a[1] > m[1]);
     }
 
     struct Task
