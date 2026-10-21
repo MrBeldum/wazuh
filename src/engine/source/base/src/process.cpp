@@ -2,13 +2,17 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <optional>
+#include <poll.h>
 #include <pthread.h>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <vector>
@@ -192,8 +196,8 @@ auto lookupId(const char* kind,
     }
 }
 
-/// fork(); the parent leaves with _exit (no atexit handlers, no static destructors), the child returns.
-void detach(const char* stage, const ProcessSysCalls& s)
+/// fork(); returns the child pid in the parent and 0 in the child. Throws on failure.
+pid_t forkOrThrow(const char* stage, const ProcessSysCalls& s)
 {
     const pid_t pid = s.fork();
     if (pid < 0)
@@ -201,29 +205,12 @@ void detach(const char* stage, const ProcessSysCalls& s)
         const int err = errno;
         throw std::runtime_error {fmt::format("fork failed ({}): {}", stage, describeError(err))};
     }
-    if (pid > 0)
-    {
-        _exit(EXIT_SUCCESS);
-    }
+    return pid;
 }
-} // namespace
 
-void goDaemon(const ProcessSysCalls& sys)
+/// Redirects stdin, stdout and stderr to /dev/null (shared by goDaemon and goDaemonSynced).
+void redirectStdioToDevNull(const ProcessSysCalls& s)
 {
-    const auto s = withDefaults(sys);
-
-    detach("first", s);
-
-    if (s.setsid() < 0)
-    {
-        const int err = errno;
-        throw std::runtime_error {fmt::format("setsid failed: {}", describeError(err))};
-    }
-
-    detach("second", s);
-
-    s.umask(027);
-
     const int fd = s.open("/dev/null", O_RDWR | O_CLOEXEC, 0);
     if (fd < 0)
     {
@@ -248,6 +235,242 @@ void goDaemon(const ProcessSysCalls& sys)
     if (fd > STDERR_FILENO)
     {
         s.close(fd);
+    }
+}
+
+/// Writes the whole buffer, retrying on EINTR. Returns false on any other failure.
+bool writeAll(int fd, const char* data, std::size_t size, const ProcessSysCalls& s)
+{
+    std::size_t written = 0;
+    while (written < size)
+    {
+        const ssize_t rc = s.write(fd, data + written, size - written);
+        if (rc < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            return false;
+        }
+        if (rc == 0)
+        {
+            return false; // short write
+        }
+        written += static_cast<std::size_t>(rc);
+    }
+    return true;
+}
+
+/// Single-line startup-report protocol between the daemonized child and the launcher.
+constexpr std::string_view STARTUP_OK_LINE = "OK\n";
+constexpr std::string_view STARTUP_FAIL_PREFIX = "FAIL ";
+/// Cap on the failure message so the whole report fits in one PIPE_BUF-sized atomic write.
+constexpr std::size_t STARTUP_MESSAGE_MAX = 4000;
+/// Cap on how much of the pipe the launcher reads while waiting for the status line.
+constexpr std::size_t STARTUP_READ_MAX = 8192;
+
+/// Reads the child's status line: blocks (with timeout) until a full line arrives or the pipe closes.
+DaemonStartupResult awaitDaemonStartup(int readFd, std::chrono::seconds timeout)
+{
+    DaemonStartupResult result {};
+    std::string raw;
+    raw.reserve(256);
+
+    // poll(2)/read(2) are intentionally direct: no fake survives the real forks of goDaemonSynced().
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (raw.size() < STARTUP_READ_MAX)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline)
+        {
+            return result; // reported == false: timed out
+        }
+        const auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+        struct pollfd pfd {.fd = readFd, .events = POLLIN, .revents = 0};
+        const int prc = ::poll(&pfd, 1, static_cast<int>(remaining));
+        if (prc < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            return result;
+        }
+        if (prc == 0)
+        {
+            return result; // timed out
+        }
+        char buf[256];
+        const ssize_t n = ::read(readFd, buf, sizeof(buf));
+        if (n == 0)
+        {
+            result.childGone = true;
+            return result; // EOF: every write end is closed, so the child died without reporting.
+        }
+        if (n < 0)
+        {
+            return result; // Read error: treat like a timeout (the launcher cannot know).
+        }
+        raw.append(buf, static_cast<std::size_t>(n));
+        if (raw.find('\n') != std::string::npos)
+        {
+            break;
+        }
+    }
+
+    result.reported = true;
+    const std::string line = raw.substr(0, raw.find('\n'));
+    if (line == "OK")
+    {
+        result.started = true;
+    }
+    else if (line.rfind(STARTUP_FAIL_PREFIX, 0) == 0)
+    {
+        result.message = line.substr(STARTUP_FAIL_PREFIX.size());
+    }
+    // Anything else: reported but unparseable; started stays false with an empty message.
+    return result;
+}
+} // namespace
+
+void goDaemon(const ProcessSysCalls& sys)
+{
+    const auto s = withDefaults(sys);
+
+    if (forkOrThrow("first", s) > 0)
+    {
+        _exit(EXIT_SUCCESS);
+    }
+
+    if (s.setsid() < 0)
+    {
+        const int err = errno;
+        throw std::runtime_error {fmt::format("setsid failed: {}", describeError(err))};
+    }
+
+    if (forkOrThrow("second", s) > 0)
+    {
+        _exit(EXIT_SUCCESS);
+    }
+
+    s.umask(027);
+    redirectStdioToDevNull(s);
+}
+
+DaemonStartupSync createStartupSync(const ProcessSysCalls&)
+{
+    // pipe(2) is intentionally direct (see the header): no fake can cross the real forks below.
+    int fds[2] = {-1, -1};
+    if (::pipe(fds) != 0)
+    {
+        const int err = errno;
+        throw std::runtime_error {fmt::format("could not create startup-status pipe: {}", describeError(err))};
+    }
+    return DaemonStartupSync {.readFd = fds[0], .writeFd = fds[1]};
+}
+
+void goDaemonSynced(DaemonStartupSync sync, std::chrono::seconds timeout, const ProcessSysCalls& sys)
+{
+    const auto s = withDefaults(sys);
+
+    // First fork: unlike goDaemon(), the original process does NOT exit blindly. It closes its copy of
+    // the write end (so EOF is meaningful) and blocks until the daemonized child reports startup status,
+    // then leaves with the child's status. stderr here is still the original one.
+    if (forkOrThrow("first", s) > 0)
+    {
+        s.close(sync.writeFd);
+        const auto result = awaitDaemonStartup(sync.readFd, timeout);
+        s.close(sync.readFd);
+        if (result.childGone)
+        {
+            // Every write end is closed without a report: the daemon died during startup.
+            const std::string err =
+                "error: wazuh-engine failed to start (daemon terminated without reporting startup status)\n";
+            writeAll(STDERR_FILENO, err.data(), err.size(), s);
+            _exit(EXIT_FAILURE);
+        }
+        if (!result.reported)
+        {
+            // The child never reported in time: keep the historical fire-and-forget behavior, so a
+            // hung child cannot wedge the starter (the starter's own readiness checks stay
+            // authoritative).
+            const std::string warning =
+                "warning: wazuh-engine did not report startup status; continuing in background\n";
+            writeAll(STDERR_FILENO, warning.data(), warning.size(), s);
+            _exit(EXIT_SUCCESS);
+        }
+        if (!result.started)
+        {
+            std::string err = "error: wazuh-engine failed to start";
+            if (!result.message.empty())
+            {
+                err += ": ";
+                err += result.message;
+            }
+            err += "\n";
+            writeAll(STDERR_FILENO, err.data(), err.size(), s);
+            _exit(EXIT_FAILURE);
+        }
+        _exit(EXIT_SUCCESS);
+    }
+
+    // Intermediate child: hand the write end to the final child, then leave immediately as in goDaemon().
+    s.close(sync.readFd);
+    if (s.setsid() < 0)
+    {
+        const int err = errno;
+        throw std::runtime_error {fmt::format("setsid failed: {}", describeError(err))};
+    }
+    if (forkOrThrow("second", s) > 0)
+    {
+        s.close(sync.writeFd);
+        _exit(EXIT_SUCCESS);
+    }
+
+    // Final daemon child: the only remaining holder of the write end. It must call
+    // reportDaemonStartup() exactly once when startup completes or fails.
+    s.umask(027);
+    // The status pipe's reader (the launcher) may vanish before the child reports (e.g. after the
+    // await timeout); the report must never kill the daemon with SIGPIPE. main() re-asserts SIG_IGN
+    // later for its own reasons (uvw/libuv/libev).
+    ::signal(SIGPIPE, SIG_IGN);
+    redirectStdioToDevNull(s);
+}
+
+void reportDaemonStartup(DaemonStartupSync& sync,
+                         bool started,
+                         std::string_view message,
+                         const ProcessSysCalls& sys)
+{
+    const auto s = withDefaults(sys);
+    if (sync.writeFd >= 0)
+    {
+        std::string line;
+        if (started)
+        {
+            line = std::string(STARTUP_OK_LINE);
+        }
+        else
+        {
+            line.reserve(STARTUP_FAIL_PREFIX.size() + STARTUP_MESSAGE_MAX + 1);
+            line += STARTUP_FAIL_PREFIX;
+            for (const char c : message.substr(0, STARTUP_MESSAGE_MAX))
+            {
+                line += (c == '\n' || c == '\r') ? ' ' : c;
+            }
+            line += '\n';
+        }
+        // Best effort: the launcher may already be gone; there is nothing sensible to do on failure here.
+        writeAll(sync.writeFd, line.data(), line.size(), s);
+        s.close(sync.writeFd);
+        sync.writeFd = -1;
+    }
+    if (sync.readFd >= 0)
+    {
+        s.close(sync.readFd);
+        sync.readFd = -1;
     }
 }
 

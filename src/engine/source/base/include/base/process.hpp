@@ -3,6 +3,7 @@
 #define _BASE_PROCESS_HPP
 
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <functional>
@@ -10,6 +11,7 @@
 #include <pthread.h>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 #include <grp.h>
 #include <pwd.h>
@@ -65,6 +67,90 @@ struct ProcessSysCalls
  * @throws std::runtime_error if any step fails.
  */
 void goDaemon(const ProcessSysCalls& sys = {});
+
+/**
+ * @brief Startup-status channel between a daemonized child and the process that launched it.
+ *
+ * Created by the launcher with createStartupSync() before daemonizing. The write end is inherited by the
+ * daemonized child across the forks of goDaemonSynced(); the read end stays with the original process.
+ * Lets the launcher learn whether startup succeeded instead of exiting 0 blindly (wazuh/wazuh#40439).
+ */
+struct DaemonStartupSync
+{
+    int readFd {-1};  ///< Held by the launcher: the startup report is read here.
+    int writeFd {-1}; ///< Inherited by the daemonized child: the startup report is written here.
+};
+
+/// How long the launcher waits for the daemon child's startup report before giving up and falling back
+/// to the historical fire-and-forget behavior (with a warning on stderr).
+constexpr std::chrono::seconds DAEMON_STARTUP_TIMEOUT {120};
+
+/// Outcome of awaiting the daemon child's startup report.
+struct DaemonStartupResult
+{
+    bool started {false};  ///< The child reported successful startup.
+    bool reported {false}; ///< The child wrote a report at all.
+    bool childGone {false}; ///< The pipe hit EOF with no report: the child died without reporting.
+    std::string message;   ///< The child's failure message (empty on success or when nothing was reported).
+};
+
+/**
+ * @brief Creates the startup-status channel for goDaemonSynced().
+ *
+ * pipe(2) is intentionally not part of ProcessSysCalls: no fake can cross the real forks of
+ * goDaemonSynced(), and the functional tests exercise the real channel end to end.
+ *
+ * @param sys Unused; kept for signature symmetry.
+ * @return DaemonStartupSync The channel; both ends are open on success.
+ * @throws std::runtime_error if pipe(2) fails.
+ */
+DaemonStartupSync createStartupSync(const ProcessSysCalls& sys = {});
+
+/**
+ * @brief Daemonize like goDaemon(), but the original process waits for the child's startup report.
+ *
+ * The forks, setsid, umask(027) and the /dev/null redirection of the final child are exactly those of
+ * goDaemon(). The difference is the original (pre-fork) process: instead of exiting 0 blindly, it closes
+ * its copy of the write end, blocks until the daemonized child calls reportDaemonStartup() (or the pipe
+ * closes, or the timeout expires), prints the child's failure message to the original stderr, and leaves
+ * with _exit(EXIT_SUCCESS) on a success report or _exit(EXIT_FAILURE) on a failure report.
+ *
+ * If the child dies without reporting (EOF) the launcher prints a generic message and leaves with
+ * _exit(EXIT_FAILURE). If the timeout expires first, the launcher prints a warning and leaves with
+ * _exit(EXIT_SUCCESS): the historical fire-and-forget behavior, so a hung child cannot wedge the
+ * starter (the starter's own readiness checks stay authoritative).
+ *
+ * Only the daemonized child returns from this function; it must call reportDaemonStartup() exactly once.
+ * The parents always leave with the real _exit (no atexit handlers, no static destructors), as in goDaemon(). The parents always leave with the real _exit (no atexit handlers, no static destructors), as in goDaemon().
+ *
+ * @param sync Channel from createStartupSync().
+ * @param timeout How long the original process waits for the report.
+ * @param sys System calls (the real ones by default).
+ * @throws std::runtime_error if any daemonization step fails (thrown in the original process, whose
+ * stderr is still intact).
+ */
+void goDaemonSynced(DaemonStartupSync sync,
+                    std::chrono::seconds timeout = DAEMON_STARTUP_TIMEOUT,
+                    const ProcessSysCalls& sys = {});
+
+/**
+ * @brief Called once by the daemonized child to report startup status to the launcher.
+ *
+ * Writes a single status line ("OK" or "FAIL <message>", newlines in the message replaced by spaces,
+ * truncated to 4000 characters so the write fits in one PIPE_BUF) and closes both ends of the channel.
+ * Best effort: write failures are ignored (the launcher may already be gone). Takes the channel by
+ * reference and invalidates it, so a second call is a safe no-op (the fd numbers must never be reused
+ * after the first close).
+ *
+ * @param sync Channel from createStartupSync() (as inherited across the forks); invalidated on return.
+ * @param started Whether startup succeeded.
+ * @param message Failure detail (ignored when started is true).
+ * @param sys System calls (the real ones by default).
+ */
+void reportDaemonStartup(DaemonStartupSync& sync,
+                         bool started,
+                         std::string_view message,
+                         const ProcessSysCalls& sys = {});
 
 /**
  * @brief Creates (or truncates) the PID file <path>/<name>-<pid>.pid with mode 0640 and content "<pid>\n".

@@ -218,14 +218,11 @@ int main(int argc, char* argv[])
         }
     }
 
-    // Daemonize the process
-    if (!opts.runForeground)
-    {
-        base::process::goDaemon();
-    }
-
-    // Load the configuration. Manager mode: the internal options live in the fixed configuration directory.
-    // Standalone mode never reads the file (conf::Conf::load()); its path stays relative to the cwd.
+    // Load the configuration BEFORE daemonizing: a failure here must reach the process that started the
+    // engine (wazuh/wazuh#40439). Manager mode: the internal options live in the fixed configuration
+    // directory. Standalone mode never reads the file (conf::Conf::load()); its path stays relative to the
+    // cwd. Neither mode changes directory or umask before this point, so the load reads exactly what it
+    // used to read after goDaemon().
     const auto confPath = base::process::isStandaloneModeEnable()
                               ? base::process::getWazuhHome() / "etc/wazuh-manager-internal-options.conf"
                               : std::filesystem::path(std::string(base::managerConfig::MANAGER_CONF_DIR))
@@ -238,7 +235,19 @@ int main(int argc, char* argv[])
     catch (const std::exception& e)
     {
         LOG_ERROR("Error loading configuration: {}", e.what());
+        fprintf(stderr, "Error loading configuration: %s\n", e.what());
         exit(EXIT_FAILURE);
+    }
+
+    // Daemonize the process. The launcher blocks until the daemonized child reports startup status
+    // (wazuh/wazuh#40439): a startup failure now surfaces as a non-zero exit status and an error message
+    // instead of a silent exit 0. Only the daemonized child returns from goDaemonSynced().
+    base::process::DaemonStartupSync startupSync {};
+    const bool syncedStartup = !opts.runForeground;
+    if (syncedStartup)
+    {
+        startupSync = base::process::createStartupSync();
+        base::process::goDaemonSynced(startupSync);
     }
 
     // Set signal [SIGINT]: Crt+C handler and signal [SIGTERM]: kill handler
@@ -928,6 +937,12 @@ int main(int argc, char* argv[])
             LOG_INFO("Engine started");
         }
 
+        if (syncedStartup)
+        {
+            // The engine is up and listening: release the launcher (wazuh/wazuh#40439).
+            base::process::reportDaemonStartup(startupSync, true, {});
+        }
+
         if (enableProcessing)
         {
             // Helper to check if the orchestrator has any enabled route.
@@ -1042,12 +1057,20 @@ int main(int argc, char* argv[])
     {
         const auto msg = utils::getExceptionStack(e);
         LOG_ERROR("An error occurred while initializing the modules: {}.", msg);
+        if (syncedStartup)
+        {
+            base::process::reportDaemonStartup(startupSync, false, msg);
+        }
         exitHandler.execute();
         exit(EXIT_FAILURE);
     }
     catch (...)
     {
         LOG_ERROR("An unknown error occurred while initializing the modules");
+        if (syncedStartup)
+        {
+            base::process::reportDaemonStartup(startupSync, false, "unknown error");
+        }
         exitHandler.execute();
         exit(EXIT_FAILURE);
     }

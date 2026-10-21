@@ -474,7 +474,15 @@ get_wazuh_engine_pid()
     local ticks=0
     local pidfile
 
+    # The binary blocks until the daemonized engine reports startup status (wazuh/wazuh#40439):
+    # a non-zero exit here is a startup failure, reported immediately instead of after the
+    # pidfile poll below times out.
     ${DIR}/bin/wazuh-manager-analysisd
+    local engine_rc=$?
+    if [ $engine_rc -ne 0 ]; then
+        echo "wazuh-manager-analysisd failed to start (exit code ${engine_rc})."
+        return 1
+    fi
 
     while [ $ticks -lt $max_ticks ]; do
         for pidfile in ${DIR}/var/run/wazuh-manager-analysisd-*.pid; do

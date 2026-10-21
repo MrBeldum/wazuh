@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -542,6 +543,176 @@ TEST(GoDaemonFunctionalTest, ParentsSkipExitHandlers)
     EXPECT_EQ(WEXITSTATUS(status), EXIT_SUCCESS);
 
     EXPECT_EQ(got, "G");
+}
+
+/*** goDaemonSynced ***/
+
+// The original process learns about a startup failure from the daemonized child: it prints the child's
+// message to the (original) stderr and leaves with _exit(EXIT_FAILURE) (wazuh/wazuh#40439).
+TEST(GoDaemonSyncedFunctionalTest, ReportsFailureToLauncher)
+{
+    int errPipe[2];
+    ASSERT_EQ(pipe(errPipe), 0);
+
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0)
+    {
+        // Child = the "original process" for goDaemonSynced: capture its stderr.
+        close(errPipe[0]);
+        if (dup2(errPipe[1], STDERR_FILENO) < 0)
+        {
+            _exit(EXIT_WRITE_FAILURE);
+        }
+        close(errPipe[1]);
+
+        auto sync = createStartupSync();
+        goDaemonSynced(sync, std::chrono::seconds(10));
+        // Grandchild (daemon): report a startup failure, like main()'s catch block does.
+        reportDaemonStartup(sync, false, "An error occurred while initializing the modules: boom.");
+        _exit(EXIT_SUCCESS); // a real daemon would keep running; the test ends here
+    }
+
+    close(errPipe[1]);
+    std::string captured;
+    char buf[256];
+    ssize_t n = 0;
+    while ((n = read(errPipe[0], buf, sizeof(buf))) > 0)
+    {
+        captured.append(buf, static_cast<std::size_t>(n));
+    }
+    close(errPipe[0]);
+
+    int status = 0;
+    ASSERT_EQ(waitpid(pid, &status, 0), pid);
+    EXPECT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), EXIT_FAILURE);
+    EXPECT_NE(captured.find("error: wazuh-engine failed to start"), std::string::npos);
+    EXPECT_NE(captured.find("boom."), std::string::npos);
+}
+
+// A success report releases the launcher with _exit(EXIT_SUCCESS) and no stderr output.
+TEST(GoDaemonSyncedFunctionalTest, ReportsSuccessToLauncher)
+{
+    int errPipe[2];
+    ASSERT_EQ(pipe(errPipe), 0);
+
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0)
+    {
+        close(errPipe[0]);
+        if (dup2(errPipe[1], STDERR_FILENO) < 0)
+        {
+            _exit(EXIT_WRITE_FAILURE);
+        }
+        close(errPipe[1]);
+
+        auto sync = createStartupSync();
+        goDaemonSynced(sync, std::chrono::seconds(10));
+        // Grandchild (daemon): startup succeeded.
+        reportDaemonStartup(sync, true, {});
+        _exit(EXIT_SUCCESS);
+    }
+
+    close(errPipe[1]);
+    std::string captured;
+    char buf[256];
+    ssize_t n = 0;
+    while ((n = read(errPipe[0], buf, sizeof(buf))) > 0)
+    {
+        captured.append(buf, static_cast<std::size_t>(n));
+    }
+    close(errPipe[0]);
+
+    int status = 0;
+    ASSERT_EQ(waitpid(pid, &status, 0), pid);
+    EXPECT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), EXIT_SUCCESS);
+    EXPECT_TRUE(captured.empty());
+}
+
+// The daemon child dying without reporting is a startup failure, not a silent success.
+TEST(GoDaemonSyncedFunctionalTest, ChildDeathWithoutReportIsFailure)
+{
+    int errPipe[2];
+    ASSERT_EQ(pipe(errPipe), 0);
+
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0)
+    {
+        close(errPipe[0]);
+        if (dup2(errPipe[1], STDERR_FILENO) < 0)
+        {
+            _exit(EXIT_WRITE_FAILURE);
+        }
+        close(errPipe[1]);
+
+        auto sync = createStartupSync();
+        goDaemonSynced(sync, std::chrono::seconds(10));
+        // Grandchild (daemon): dies without ever reporting (e.g. a crash during init).
+        _exit(EXIT_DAEMON_FAILURE);
+    }
+
+    close(errPipe[1]);
+    std::string captured;
+    char buf[256];
+    ssize_t n = 0;
+    while ((n = read(errPipe[0], buf, sizeof(buf))) > 0)
+    {
+        captured.append(buf, static_cast<std::size_t>(n));
+    }
+    close(errPipe[0]);
+
+    int status = 0;
+    ASSERT_EQ(waitpid(pid, &status, 0), pid);
+    EXPECT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), EXIT_FAILURE);
+    EXPECT_NE(captured.find("terminated without reporting startup status"), std::string::npos);
+}
+
+// A child slower than the timeout must not wedge the launcher: warn and keep the historical
+// fire-and-forget behavior. The late report must not kill the daemon with SIGPIPE either.
+TEST(GoDaemonSyncedFunctionalTest, TimeoutKeepsHistoricalBehavior)
+{
+    int errPipe[2];
+    ASSERT_EQ(pipe(errPipe), 0);
+
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0)
+    {
+        close(errPipe[0]);
+        if (dup2(errPipe[1], STDERR_FILENO) < 0)
+        {
+            _exit(EXIT_WRITE_FAILURE);
+        }
+        close(errPipe[1]);
+
+        auto sync = createStartupSync();
+        goDaemonSynced(sync, std::chrono::seconds(1));
+        // Grandchild (daemon): pathologically slow startup; the report arrives after the timeout.
+        sleep(2);
+        reportDaemonStartup(sync, true, {});
+        _exit(EXIT_SUCCESS);
+    }
+
+    close(errPipe[1]);
+    std::string captured;
+    char buf[256];
+    ssize_t n = 0;
+    while ((n = read(errPipe[0], buf, sizeof(buf))) > 0)
+    {
+        captured.append(buf, static_cast<std::size_t>(n));
+    }
+    close(errPipe[0]);
+
+    int status = 0;
+    ASSERT_EQ(waitpid(pid, &status, 0), pid);
+    EXPECT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), EXIT_SUCCESS);
+    EXPECT_NE(captured.find("did not report startup status"), std::string::npos);
 }
 
 /*** lookupUid ***/
