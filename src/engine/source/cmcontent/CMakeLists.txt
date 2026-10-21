@@ -22,14 +22,12 @@ target_include_directories(cmcontent_cmcontent
 target_link_libraries(cmcontent_cmcontent
     PUBLIC
     base
-    store::istore
     cmcrud::icmcrud
     router::irouter
     iockvdb::ikvdb
     # content_manager is a SHARED library built outside the engine tree, and it is PUBLIC here
-    # because this target's own public headers name its types: iocTypeSink.hpp and rulesetSink.hpp
-    # both implement IContentSink, and cmsync/iocsync hold ContentRegister members. A consumer that
-    # cannot see contentSink.hpp cannot include ours.
+    # because this target's own public headers name its types: both sinks implement IContentSink and
+    # contentTopic.hpp takes a TopicSpec. A consumer that cannot see those headers cannot include ours.
     #
     # Note the ABI consequence this makes explicit rather than hides: wazuh-engine links libstdc++
     # statically while content_manager.so links it dynamically, so the contract crosses that
@@ -43,8 +41,8 @@ add_library(cmcontent::cmcontent ALIAS cmcontent_cmcontent)
 ####################################################################################################
 if(ENGINE_BUILD_TEST)
 
-# Mocks: the fake topic registry, shared with cmsync_utest and iocsync_utest. Both drive their
-# orchestration through it, which is the only way to exercise that code without a live indexer.
+# Mocks: the fake topic registry, shared with cmsync_utest and iocsync_utest, which drive their
+# orchestration through it instead of a live indexer.
 add_library(cmcontent_mocks INTERFACE)
 target_include_directories(cmcontent_mocks INTERFACE ${TEST_MOCK_DIR})
 target_link_libraries(cmcontent_mocks INTERFACE GTest::gmock cmcontent::cmcontent)

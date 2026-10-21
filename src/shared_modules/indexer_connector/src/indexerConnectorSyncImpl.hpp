@@ -1743,7 +1743,8 @@ public:
             }
         };
 
-        const auto onError = [this, &needToRetry](const std::string& error, const long statusCode, const std::string&)
+        const auto onError =
+            [this, &needToRetry](const std::string& error, const long statusCode, const std::string& responseBody)
         {
             if (statusCode == HTTP_TOO_MANY_REQUESTS)
             {
@@ -1752,7 +1753,14 @@ public:
             }
             else
             {
-                LOGFN_WARN(m_logFn, "Search request failed: %s, status code: %ld", error.c_str(), statusCode);
+                // The indexer's reason (e.g. which field a 400 rejects) is in the body, not the status.
+                constexpr std::size_t MAX_REASON_BYTES {512};
+                const auto reason = responseBody.substr(0, MAX_REASON_BYTES);
+                LOGFN_WARN(m_logFn,
+                           "Search request failed: %s, status code: %ld, response: %s",
+                           error.c_str(),
+                           statusCode,
+                           reason.c_str());
                 throw IndexerConnectorException("Search request failed with status " + std::to_string(statusCode) +
                                                 ": " + error);
             }
