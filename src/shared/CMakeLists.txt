@@ -6,6 +6,17 @@ if(NOT DEFINED WAZUH_MAIN_PROJECT)
   get_filename_component(SRC_FOLDER ${CMAKE_SOURCE_DIR}/../ ABSOLUTE)
 endif()
 
+# Runtime group follows the install type, exactly like the daemon targets:
+# manager builds use "wazuh-manager"; agent and Windows-agent builds keep "wazuh".
+# debug_op.c (log-file group fix-up) is compiled into this library, so it needs the
+# same per-target GROUPGLOBAL the daemons get through their own compile definitions
+# (wazuh/wazuh#40437). Without this, the defs.h default "wazuh" is baked in even for
+# manager builds, where the "wazuh" group does not exist and the chown is skipped.
+set(WAZUH_RUNTIME_GROUP "wazuh")
+if(NOT "${TARGET}" STREQUAL "winagent" AND NOT "${TARGET}" STREQUAL "agent")
+  set(WAZUH_RUNTIME_GROUP "wazuh-manager")
+endif()
+
 # Include directories
 include_directories(
   ${SRC_FOLDER}/external/audit-userspace/lib
@@ -316,7 +327,7 @@ set_target_properties(
              POSITION_INDEPENDENT_CODE ON)
 
 # Add compile definitions
-target_compile_definitions(wazuh PRIVATE ARGV0="wazuh")
+target_compile_definitions(wazuh PRIVATE ARGV0="wazuh" GROUPGLOBAL="${WAZUH_RUNTIME_GROUP}")
 
 if(OS_BIG_ENDIAN)
   add_definitions(-DOS_BIG_ENDIAN)
@@ -349,7 +360,7 @@ if(UNIT_TEST)
                POSITION_INDEPENDENT_CODE ON)
 
   # Add same compile definitions as production library
-  target_compile_definitions(wazuh_test PRIVATE ARGV0="wazuh")
+  target_compile_definitions(wazuh_test PRIVATE ARGV0="wazuh" GROUPGLOBAL="${WAZUH_RUNTIME_GROUP}")
   target_compile_definitions(wazuh_test PRIVATE WAZUH_UNIT_TESTING)
 
   if(CA_NAME)
