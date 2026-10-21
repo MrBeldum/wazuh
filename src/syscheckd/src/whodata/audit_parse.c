@@ -766,16 +766,25 @@ void audit_parse(char *buffer) {
                                 (w_evt->inode) ? w_evt->inode : "", (file_path) ? file_path : "",
                                 (w_evt->process_name) ? w_evt->process_name : "");
 
-                        // Resolve the path like the items=2 case below: when the operation is
-                        // performed through a monitored symbolic link, the kernel reports the
-                        // symlink path, which does not match the resolved path FIM stores.
-                        w_evt->path = realpath(file_path, NULL);
-                        if (w_evt->path == NULL) {
-                            os_strdup(file_path, w_evt->path);
-                            mdebug1(FIM_CHECK_LINK_REALPATH, w_evt->path); // LCOV_EXCL_LINE
-                        }
+                        // Keep the audited path when it already belongs to a whodata directory, as before #39736.
+                        // Otherwise resolve it: the operation may have gone through a followed symbolic link,
+                        // whose resolved path is the one FIM stores.
+                        w_rwlock_rdlock(&syscheck.directories_lock);
+                        const directory_t *configuration = fim_configuration_directory(file_path);
+                        const bool keep_path = configuration && (configuration->options & WHODATA_ACTIVE);
+                        w_rwlock_unlock(&syscheck.directories_lock);
 
-                        free(file_path);
+                        if (keep_path) {
+                            w_evt->path = file_path;
+                        } else {
+                            w_evt->path = realpath(file_path, NULL);
+                            if (w_evt->path == NULL) {
+                                os_strdup(file_path, w_evt->path);
+                                mdebug1(FIM_CHECK_LINK_REALPATH, w_evt->path); // LCOV_EXCL_LINE
+                            }
+
+                            free(file_path);
+                        }
 
                         if (w_evt->inode) {
                             fim_whodata_event(w_evt);

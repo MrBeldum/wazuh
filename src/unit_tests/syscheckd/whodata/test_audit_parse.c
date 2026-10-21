@@ -972,8 +972,8 @@ void test_audit_parse_chmod(void **state) {
     char audit_key_msg[OS_SIZE_128] = {0};
     char * buffer = " \
         type=SYSCALL msg=audit(1571992092.822:3004348): arch=c000003e syscall=268 success=yes exit=0 a0=ffffff9c a1=5648a8ab74c0 a2=1ff a3=fff items=1 ppid=3211 pid=58280 auid=4 uid=99 gid=78 euid=29 suid=0 fsuid=0 egid=0 sgid=0 fsgid=0 tty=pts3 ses=5 comm=\"chmod\" exe=\"/usr/bin/chmod\" key=\"wazuh_fim\" \
-        type=CWD msg=audit(1571992092.822:3004348): cwd=\"/root/test\" \
-        type=PATH msg=audit(1571992092.822:3004348): item=0 name=\"/root/test/file\" inode=19 dev=08:02 mode=0100644 ouid=0 ogid=0 rdev=00:00 nametype=NORMAL cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 \
+        type=CWD msg=audit(1571992092.822:3004348): cwd=\"/var/test\" \
+        type=PATH msg=audit(1571992092.822:3004348): item=0 name=\"/var/test/file\" inode=19 dev=08:02 mode=0100644 ouid=0 ogid=0 rdev=00:00 nametype=NORMAL cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 \
         type=PROCTITLE msg=audit(1571992092.822:3004348): proctitle=63686D6F6400373737002F726F6F742F746573742F66696C65 \
     ";
 
@@ -994,16 +994,19 @@ void test_audit_parse_chmod(void **state) {
     will_return(__wrap_readlink, 0);
 
     expect_string(__wrap__mdebug2, formatted_msg,
-        "(6247): audit_event: uid=user99, auid=lp, euid=user29, gid=, pid=58280, ppid=3211, inode=19, path=/root/test/file, pname=/usr/bin/chmod");
+        "(6247): audit_event: uid=user99, auid=lp, euid=user29, gid=, pid=58280, ppid=3211, inode=19, path=/var/test/file, pname=/usr/bin/chmod");
 
-    expect_string(__wrap_realpath, path, "/root/test/file");
-    will_return(__wrap_realpath, strdup("/root/test/file"));
+    expect_function_call_any(__wrap_pthread_rwlock_rdlock);
+    expect_function_call_any(__wrap_pthread_rwlock_wrlock);
+    expect_function_call_any(__wrap_pthread_rwlock_unlock);
+    expect_function_call_any(__wrap_pthread_mutex_lock);
+    expect_function_call_any(__wrap_pthread_mutex_unlock);
 
     expect_value(__wrap_fim_whodata_event, w_evt->process_id, 58280);
     expect_string(__wrap_fim_whodata_event, w_evt->user_id, "99");
     expect_string(__wrap_fim_whodata_event, w_evt->group_id, "78");
     expect_string(__wrap_fim_whodata_event, w_evt->process_name, "/usr/bin/chmod");
-    expect_string(__wrap_fim_whodata_event, w_evt->path, "/root/test/file");
+    expect_string(__wrap_fim_whodata_event, w_evt->path, "/var/test/file");
     expect_string(__wrap_fim_whodata_event, w_evt->audit_uid, "4");
     expect_string(__wrap_fim_whodata_event, w_evt->effective_uid, "29");
     expect_string(__wrap_fim_whodata_event, w_evt->inode, "19");
@@ -1380,7 +1383,7 @@ int main(void) {
         cmocka_unit_test(test_audit_parse_mv),
         cmocka_unit_test(test_audit_parse_mv_hex),
         cmocka_unit_test(test_audit_parse_rm),
-        cmocka_unit_test(test_audit_parse_chmod),
+        cmocka_unit_test_setup_teardown(test_audit_parse_chmod, setup_config, teardown_config),
         cmocka_unit_test(test_audit_parse_rm_hc),
         cmocka_unit_test(test_audit_parse_add_hc),
         cmocka_unit_test(test_audit_parse_unknown_hc),
