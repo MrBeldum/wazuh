@@ -331,3 +331,109 @@ TEST_F(NPMTest, getPackages_UninspectableFolderIsReportedUnsized)
     EXPECT_EQ(capturedJson.at("name"), "TestPackage1");
     EXPECT_FALSE(capturedJson.contains("size"));
 }
+
+TEST_F(NPMTest, getPackages_ScopedAndUnscopedPackagesTest)
+{
+    const std::filesystem::path nodeModulesFolder {"/fake/node_modules"};
+    const std::filesystem::path unscopedFolder {nodeModulesFolder / "package1"};
+    const std::filesystem::path scopeFolder {nodeModulesFolder / "@openai"};
+    const std::filesystem::path scopedFolder {scopeFolder / "codex"};
+
+    EXPECT_CALL(*mockFileSystem, exists(testing::_)).WillRepeatedly(Return(true));
+    EXPECT_CALL(*mockFileSystem, is_directory(testing::_)).WillRepeatedly(Return(true));
+    EXPECT_CALL(*mockFileSystem, is_regular_file(testing::_)).WillRepeatedly(Return(true));
+    EXPECT_CALL(*mockFileSystem, list_directory(nodeModulesFolder))
+    .WillOnce(Return(std::vector<std::filesystem::path> {unscopedFolder, scopeFolder}));
+    EXPECT_CALL(*mockFileSystem, list_directory(scopeFolder))
+    .WillOnce(Return(std::vector<std::filesystem::path> {scopedFolder}));
+
+    EXPECT_CALL(*npm, readJson(unscopedFolder / "package.json"))
+    .WillOnce(Return(nlohmann::json {{"name", "TestPackage1"}, {"version", "1.0.0"}}));
+    EXPECT_CALL(*npm, readJson(scopedFolder / "package.json"))
+    .WillOnce(Return(nlohmann::json {{"name", "@openai/codex"}, {"version", "0.44.0"}}));
+
+    bool foundUnscoped = false;
+    bool foundScoped = false;
+
+    npm->getPackages({"/fake"},
+                     [&](nlohmann::json & json)
+    {
+        if (json.at("name") == "TestPackage1")
+        {
+            foundUnscoped = true;
+        }
+        else if (json.at("name") == "@openai/codex")
+        {
+            foundScoped = true;
+        }
+        else
+        {
+            FAIL();
+        }
+    });
+
+    EXPECT_TRUE(foundUnscoped);
+    EXPECT_TRUE(foundScoped);
+}
+
+TEST_F(NPMTest, getPackages_EmptyScopeDirectoryTest)
+{
+    const std::filesystem::path nodeModulesFolder {"/fake/node_modules"};
+    const std::filesystem::path scopeFolder {nodeModulesFolder / "@scope"};
+
+    EXPECT_CALL(*mockFileSystem, exists(testing::_)).WillRepeatedly(Return(true));
+    EXPECT_CALL(*mockFileSystem, is_directory(testing::_)).WillRepeatedly(Return(true));
+    EXPECT_CALL(*mockFileSystem, list_directory(nodeModulesFolder))
+    .WillOnce(Return(std::vector<std::filesystem::path> {scopeFolder}));
+    EXPECT_CALL(*mockFileSystem, list_directory(scopeFolder))
+    .WillOnce(Return(std::vector<std::filesystem::path> {}));
+    // The scope folder itself is a namespace, not a package: it must never be parsed
+    EXPECT_CALL(*npm, readJson(testing::_)).Times(0);
+
+    bool callbackCalled = false;
+
+    npm->getPackages({"/fake"}, [&](nlohmann::json&)
+    {
+        callbackCalled = true;
+    });
+
+    EXPECT_FALSE(callbackCalled);
+}
+
+TEST_F(NPMTest, getPackages_InvalidScopedPackageMetadataTest)
+{
+    const std::filesystem::path nodeModulesFolder {"/fake/node_modules"};
+    const std::filesystem::path scopeFolder {nodeModulesFolder / "@scope"};
+    const std::filesystem::path badFolder {scopeFolder / "bad"};
+    const std::filesystem::path goodFolder {scopeFolder / "good"};
+
+    EXPECT_CALL(*mockFileSystem, exists(testing::_)).WillRepeatedly(Return(true));
+    EXPECT_CALL(*mockFileSystem, is_directory(testing::_)).WillRepeatedly(Return(true));
+    EXPECT_CALL(*mockFileSystem, is_regular_file(testing::_)).WillRepeatedly(Return(true));
+    EXPECT_CALL(*mockFileSystem, list_directory(nodeModulesFolder))
+    .WillOnce(Return(std::vector<std::filesystem::path> {scopeFolder}));
+    EXPECT_CALL(*mockFileSystem, list_directory(scopeFolder))
+    .WillOnce(Return(std::vector<std::filesystem::path> {badFolder, goodFolder}));
+
+    EXPECT_CALL(*npm, readJson(badFolder / "package.json"))
+    .WillOnce(Return(nlohmann::json {{"version", "1.0.0"}}));
+    EXPECT_CALL(*npm, readJson(goodFolder / "package.json"))
+    .WillOnce(Return(nlohmann::json {{"name", "@scope/good"}, {"version", "1.0.0"}}));
+
+    bool foundGood = false;
+
+    npm->getPackages({"/fake"},
+                     [&](nlohmann::json & json)
+    {
+        if (json.at("name") == "@scope/good")
+        {
+            foundGood = true;
+        }
+        else
+        {
+            FAIL();
+        }
+    });
+
+    EXPECT_TRUE(foundGood);
+}

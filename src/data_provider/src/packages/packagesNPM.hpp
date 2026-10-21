@@ -44,6 +44,13 @@ class NPM final
             }
         }
 
+        // Scoped packages are nested one level deeper: node_modules/@scope/<package>
+        bool isScopeFolder(const std::filesystem::path& folderPath) const
+        {
+            const auto folderName {folderPath.filename().string()};
+            return !folderName.empty() && folderName.front() == '@';
+        }
+
         void parsePackage(const std::filesystem::path& folderPath, std::function<void(nlohmann::json&)>& callback)
         {
             // Map to match fields
@@ -132,7 +139,23 @@ class NPM final
                         {
                             if (m_fileSystemWrapper->is_directory(packageFolder))
                             {
-                                parsePackage(packageFolder, callback);
+                                if (isScopeFolder(packageFolder))
+                                {
+                                    // Descend exactly one level for scoped packages; no
+                                    // unrestricted recursion into project dependencies
+                                    for (const auto& scopedPackageFolder :
+                                            m_fileSystemWrapper->list_directory(packageFolder))
+                                    {
+                                        if (m_fileSystemWrapper->is_directory(scopedPackageFolder))
+                                        {
+                                            parsePackage(scopedPackageFolder, callback);
+                                        }
+                                    }
+                                }
+                                else
+                                {
+                                    parsePackage(packageFolder, callback);
+                                }
                             }
                         }
                     }
