@@ -44,6 +44,8 @@ nlohmann::json FirefoxAddonsProvider::toJson(const FirefoxAddons& addons)
         entry["location"] = addon.location;
         entry["name"] = addon.name;
         entry["path"] = addon.path;
+        entry["profile"] = addon.profileName;
+        entry["profile_path"] = addon.profilePath;
         entry["source_url"] = addon.source_url;
         entry["type"] = addon.type;
         entry["uid"] = addon.uid;
@@ -203,6 +205,16 @@ FirefoxAddons FirefoxAddonsProvider::getAddons()
 
                     firefoxAddon.location = getStringField(addonJson, "location");
                     firefoxAddon.path = getStringField(addonJson, "path");
+
+                    // Key the add-on by the real profile directory it was read from (and
+                    // carry the profile name), like the Chrome provider does. Firefox's
+                    // own "location" values (app-builtin, app-builtin-addons,
+                    // app-profile) are shared across profiles and must not be used as
+                    // the inventory profile path, otherwise the same built-in add-on
+                    // from two profiles shares one inventory key and flaps (see
+                    // wazuh/wazuh#40313).
+                    firefoxAddon.profileName = entity.filename().string();
+                    firefoxAddon.profilePath = entity.string();
 
                     firefoxAddons.emplace_back(firefoxAddon);
                 }

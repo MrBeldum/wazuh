@@ -65,6 +65,8 @@ struct FirefoxAddon
     std::string location;
     std::string name;
     std::string path;
+    std::string profileName;
+    std::string profilePath;
     std::string source_url;
     std::string type;
     std::string uid;
